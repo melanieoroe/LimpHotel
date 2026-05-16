@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Modal, ScrollView, SafeAreaView, TextInput, Alert } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export default function App() {
   // --- CONFIGURACIÓN DE DATOS BASE ---
@@ -18,7 +19,6 @@ export default function App() {
     { nombre: "Bebida Saborizada", limite: 0 }
   ];
 
-  // Función para devolver la app al estado original (Zapatos sin caja)
   const crearEstadoLimpio = () => ({
     "Piso 2": habitacionesPorPisoBase.map(h => 
       h === "SEP" ? { tipo: "SEP" } : { id: h, estado: 0, consumos: {} }
@@ -32,39 +32,114 @@ export default function App() {
   const [editMode, setEditMode] = useState(false);
   const [seleccionada, setSeleccionada] = useState(null);
   const [verInforme, setVerInforme] = useState(false);
+  const [verTotales, setVerTotales] = useState(false);
+  const [verHistorial, setVerHistorial] = useState(false);
   const [verNotas, setVerNotas] = useState(false);
   const [notasPorPiso, setNotasPorPiso] = useState({});
   const [textoTemporal, setTextoTemporal] = useState("");
+  const [historialGlobal, setHistorialGlobal] = useState([]);
 
   const colores = ['#3D3D3D', '#4CAF50', '#F44336'];
 
-  // --- LÓGICA DE RESETEO (LA FUNCIÓN QUE LIMPIA TODO) ---
+  // --- CERRADURA DIGITAL: EFECTOS DE CARGA Y GUARDADO AUTOMÁTICO ---
+  useEffect(() => {
+    cargarDatosDeMemoria();
+  }, []);
+
+  const cargarDatosDeMemoria = async () => {
+    try {
+      const datosGuardados = await AsyncStorage.getItem('@LimpHotel_data');
+      const notasGuardadas = await AsyncStorage.getItem('@LimpHotel_notas');
+      const historialGuardado = await AsyncStorage.getItem('@LimpHotel_historial');
+      const modoMultiPisoGuardado = await AsyncStorage.getItem('@LimpHotel_multiPiso');
+
+      if (datosGuardados) setDataPisos(JSON.parse(datosGuardados));
+      if (notasGuardadas) setNotasPorPiso(JSON.parse(notasGuardadas));
+      if (modoMultiPisoGuardado) setMultiPiso(JSON.parse(modoMultiPisoGuardado));
+      
+      if (historialGuardado) {
+        const histParsed = JSON.parse(historialGuardado);
+        // Filtro automático: Solo mantener lo que tenga menos de 7 días
+        const unaSemanaAtras = Date.now() - 7 * 24 * 60 * 60 * 1000;
+        const historialFiltrado = histParsed.filter(item => item.timestamp > unaSemanaAtras);
+        setHistorialGlobal(historialFiltrado);
+        if (historialFiltrado.length !== histParsed.length) {
+          await AsyncStorage.setItem('@LimpHotel_historial', JSON.stringify(historialFiltrado));
+        }
+      }
+    } catch (e) {
+      Alert.alert("Error", "No se pudieron cargar los datos guardados.");
+    }
+  };
+
+  const guardarEnDisco = async (nuevaData, nuevasNotas = notasPorPiso, nuevoMulti = multiPiso) => {
+    try {
+      await AsyncStorage.setItem('@LimpHotel_data', JSON.stringify(nuevaData));
+      await AsyncStorage.setItem('@LimpHotel_notas', JSON.stringify(nuevasNotas));
+      await AsyncStorage.setItem('@LimpHotel_multiPiso', JSON.stringify(nuevoMulti));
+    } catch (e) {
+      console.log("Error guardando datos temporales");
+    }
+  };
+
+  // --- LÓGICA DE RESETEO CON COPIA HISTÓRICA ---
   const ejecutarReset = () => {
     Alert.alert(
       "Resetear Aplicación",
-      "¿Deseas borrar todos los colores, notas y consumos registrados?",
+      "¿Deseas guardar el informe actual en el Historial de la semana antes de borrar todo?",
       [
         { text: "Cancelar", style: "cancel" },
         { 
-          text: "Borrar Todo", 
+          text: "Borrar sin guardar", 
           style: "destructive",
-          onPress: () => {
-            setDataPisos(crearEstadoLimpio());
-            setNotasPorPiso({});
-            setMultiPiso(false);
-            setPisoActual("Piso 2");
-            setVerInforme(false);
-            setEditMode(false);
-          } 
+          onPress: () => procesarLimpiezaTotal(false)
+        },
+        {
+          text: "Guardar e Iniciar Nuevo Día",
+          onPress: () => procesarLimpiezaTotal(true)
         }
       ]
     );
   };
 
+  const procesarLimpiezaTotal = async (guardarEnHistorial) => {
+    if (guardarEnHistorial) {
+      const informeActual = obtenerDatosInforme();
+      if (Object.keys(informeActual).length === 0) {
+        Alert.alert("Aviso", "No hay consumos hoy para registrar en el historial. Se reinició limpio.");
+      } else {
+        const hoy = new Date();
+        const fechaString = `${hoy.getDate()}/${hoy.getMonth() + 1}/${hoy.getFullYear()} - ${hoy.getHours()}:${String(hoy.getMinutes()).padStart(2, '0')}hs`;
+        
+        const nuevoRegistro = {
+          id: Date.now().toString(),
+          timestamp: Date.now(),
+          fecha: fechaString,
+          datos: informeActual
+        };
+
+        const nuevoHistorial = [nuevoRegistro, ...historialGlobal];
+        setHistorialGlobal(nuevoHistorial);
+        await AsyncStorage.setItem('@LimpHotel_historial', JSON.stringify(nuevoHistorial));
+      }
+    }
+
+    const limpio = crearEstadoLimpio();
+    setDataPisos(limpio);
+    setNotasPorPiso({});
+    setMultiPiso(false);
+    setPisoActual("Piso 2");
+    setVerInforme(false);
+    setEditMode(false);
+    await AsyncStorage.removeItem('@LimpHotel_data');
+    await AsyncStorage.removeItem('@LimpHotel_notas');
+    await AsyncStorage.setItem('@LimpHotel_multiPiso', JSON.stringify(false));
+  };
+
   // --- LÓGICA DE PISOS Y CONSUMOS ---
   const toggleMultiFloorMode = () => {
+    let nuevosPisos = { ...dataPisos };
     if (!dataPisos["Piso 4"]) {
-      const nuevosPisos = {};
       [1, 2, 3, 4].forEach(num => {
         const nombrePiso = `Piso ${num}`;
         let listaHabitaciones = habitacionesPorPisoBase.map(h => 
@@ -80,14 +155,18 @@ export default function App() {
       });
       setDataPisos(nuevosPisos);
     }
-    setMultiPiso(!multiPiso);
+    const nuevoEstadoMulti = !multiPiso;
+    setMultiPiso(nuevoEstadoMulti);
+    guardarEnDisco(nuevosPisos, notasPorPiso, nuevoEstadoMulti);
   };
 
   const alternarColor = (index) => {
     if (!editMode) return;
     const nuevasHabitaciones = [...dataPisos[pisoActual]];
     nuevasHabitaciones[index].estado = (nuevasHabitaciones[index].estado + 1) % 3;
-    setDataPisos({ ...dataPisos, [pisoActual]: nuevasHabitaciones });
+    const nuevaData = { ...dataPisos, [pisoActual]: nuevasHabitaciones };
+    setDataPisos(nuevaData);
+    guardarEnDisco(nuevaData);
   };
 
   const manejarConsumo = (habIndex, prodObj) => {
@@ -108,7 +187,9 @@ export default function App() {
     } else {
       hab.consumos[prodObj.nombre] = (actual + 1) % (limiteFinal + 1);
     }
-    setDataPisos({ ...dataPisos, [pisoActual]: nuevasHabitaciones });
+    const nuevaData = { ...dataPisos, [pisoActual]: nuevasHabitaciones };
+    setDataPisos(nuevaData);
+    guardarEnDisco(nuevaData);
   };
 
   const obtenerDatosInforme = () => {
@@ -128,6 +209,23 @@ export default function App() {
       }
     });
     return informeMap;
+  };
+
+  // NUEVA FUNCIÓN: Suma el stock total global de reposición
+  const calcularTotalesGlobales = () => {
+    const totales = {};
+    Object.values(dataPisos).forEach(habitaciones => {
+      habitaciones.forEach(hab => {
+        if (hab.consumos) {
+          Object.entries(hab.consumos).forEach(([producto, cantidad]) => {
+            if (cantidad > 0) {
+              totales[producto] = (totales[producto] || 0) + cantidad;
+            }
+          });
+        }
+      });
+    });
+    return Object.entries(totales).sort((a, b) => b[1] - a[1]);
   };
 
   return (
@@ -182,7 +280,13 @@ export default function App() {
             <Text style={styles.textAction}>Observ.</Text>
           </TouchableOpacity>
 
-          {/* BOTÓN RESET VINCULADO CORRECTAMENTE */}
+          <TouchableOpacity 
+            style={[styles.btnAction, { borderColor: '#FF9800' }]} 
+            onPress={() => setVerHistorial(true)}
+          >
+            <Text style={[styles.textAction, { color: '#FF9800' }]}>Historial</Text>
+          </TouchableOpacity>
+
           <TouchableOpacity 
             style={[styles.btnAction, { borderColor: '#F44336' }]} 
             onPress={ejecutarReset}
@@ -196,7 +300,7 @@ export default function App() {
         </View>
       </ScrollView>
 
-      {/* MODALES (NOTAS, CONSUMO E INFORME) SE MANTIENEN IGUAL */}
+      {/* MODAL NOTAS */}
       <Modal visible={verNotas} animationType="slide">
         <View style={styles.modalDark}>
           <Text style={styles.modalTitle}>Notas - {pisoActual}</Text>
@@ -210,9 +314,11 @@ export default function App() {
           />
           <TouchableOpacity 
             style={styles.btnSave} 
-            onPress={() => {
-              setNotasPorPiso({...notasPorPiso, [pisoActual]: textoTemporal});
+            onPress={async () => {
+              const nuevasNotas = { ...notasPorPiso, [pisoActual]: textoTemporal };
+              setNotasPorPiso(nuevasNotas);
               setVerNotas(false);
+              guardarEnDisco(dataPisos, nuevasNotas);
             }}
           >
             <Text style={styles.textWhite}>GUARDAR NOTA</Text>
@@ -244,11 +350,11 @@ export default function App() {
         </View>
       </Modal>
 
-      {/* MODAL INFORME */}
+      {/* MODAL INFORME COMPLETO */}
       <Modal visible={verInforme} animationType="slide">
         <View style={styles.modalDark}>
           <Text style={styles.modalTitle}>Resumen de Consumos</Text>
-          <ScrollView>
+          <ScrollView style={{ flex: 1 }}>
             {Object.keys(obtenerDatosInforme()).length === 0 ? (
               <Text style={styles.reporteText}>No hay consumos registrados.</Text>
             ) : (
@@ -262,9 +368,73 @@ export default function App() {
               ))
             )}
           </ScrollView>
-          <TouchableOpacity style={styles.btnClose} onPress={() => setVerInforme(false)}><Text style={styles.textWhite}>CERRAR</Text></TouchableOpacity>
+
+          <TouchableOpacity 
+            style={[styles.btnSave, { backgroundColor: '#009688', marginTop: 10 }]} 
+            onPress={() => setVerTotales(true)}
+          >
+            <Text style={styles.textWhite}>📊 VER TOTALES DE REPOSICIÓN</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.btnClose} onPress={() => setVerInforme(false)}>
+            <Text style={styles.textWhite}>CERRAR</Text>
+          </TouchableOpacity>
         </View>
       </Modal>
+
+      {/* NUEVO MODAL: TOTALES DE CARGA */}
+      <Modal visible={verTotales} animationType="fade">
+        <View style={styles.modalDark}>
+          <Text style={styles.modalTitle}>📦 Carga de Reposición Total</Text>
+          <ScrollView style={{ flex: 1 }}>
+            {calcularTotalesGlobales().length === 0 ? (
+              <Text style={styles.reporteText}>Todo repuesto. Nada que cargar en el carro.</Text>
+            ) : (
+              calcularTotalesGlobales().map(([producto, cantidad]) => (
+                <View key={producto} style={styles.prodRow}>
+                  <Text style={[styles.prodName, { color: '#FFF', fontWeight: 'bold' }]}>{producto}</Text>
+                  <View style={[styles.check, { backgroundColor: '#8AB4F8', borderColor: '#8AB4F8' }]}>
+                    <Text style={{ color: '#1E1E1E', fontWeight: 'bold', fontSize: 16 }}>{cantidad}</Text>
+                  </View>
+                </View>
+              ))
+            )}
+          </ScrollView>
+          <TouchableOpacity style={styles.btnClose} onPress={() => setVerTotales(false)}>
+            <Text style={styles.textWhite}>VOLVER AL INFORME</Text>
+          </TouchableOpacity>
+        </View>
+      </Modal>
+
+      {/* NUEVO MODAL: HISTORIAL SEMANAL */}
+      <Modal visible={verHistorial} animationType="slide">
+        <View style={styles.modalDark}>
+          <Text style={styles.modalTitle}>📅 Historial Semanal (7 días)</Text>
+          <ScrollView style={{ flex: 1 }}>
+            {historialGlobal.length === 0 ? (
+              <Text style={styles.reporteText}>No hay informes antiguos guardados esta semana.</Text>
+            ) : (
+              historialGlobal.map((registro) => (
+                <View key={registro.id} style={[styles.pisoSeccion, { borderBottomWidth: 1, borderBottomColor: '#333', paddingBottom: 15 }]}>
+                  <Text style={[styles.pisoTitulo, { color: '#FF9800', fontSize: 16 }]}>Día: {registro.fecha}</Text>
+                  {Object.entries(registro.datos).map(([piso, habitaciones]) => (
+                    <View key={piso} style={{ marginLeft: 10, marginTop: 5 }}>
+                      <Text style={{ color: '#8AB4F8', fontWeight: 'bold' }}>{piso}:</Text>
+                      {habitaciones.map((linea, i) => (
+                        <Text key={i} style={[styles.reporteText, { fontSize: 14, color: '#DDD' }]}>• {linea}</Text>
+                      ))}
+                    </View>
+                  ))}
+                </View>
+              ))
+            )}
+          </ScrollView>
+          <TouchableOpacity style={styles.btnClose} onPress={() => setVerHistorial(false)}>
+            <Text style={styles.textWhite}>CERRAR HISTORIAL</Text>
+          </TouchableOpacity>
+        </View>
+      </Modal>
+
     </SafeAreaView>
   );
 }
@@ -285,9 +455,9 @@ const styles = StyleSheet.create({
   separador: { width: '100%', height: 25 },
   textHab: { fontSize: 22, fontWeight: 'bold', color: '#FFF', marginBottom: 12 },
   asterisco: { position: 'absolute', bottom: 3, fontSize: 22, color: '#FFF', fontWeight: 'bold' },
-  footerRow: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: '8%', paddingBottom: 40, marginTop: 20 },
-  btnAction: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: '#4CAF50' },
-  textAction: { color: '#4CAF50', fontWeight: 'bold' },
+  footerRow: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: '4%', paddingBottom: 40, marginTop: 20 },
+  btnAction: { paddingVertical: 8, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: '#4CAF50', minWidth: 75, alignItems: 'center' },
+  textAction: { color: '#4CAF50', fontWeight: 'bold', fontSize: 13 },
   modalDark: { flex: 1, backgroundColor: '#1E1E1E', padding: 30, paddingTop: 60 },
   modalTitle: { color: '#FFF', fontSize: 22, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
   textArea: { backgroundColor: '#333', color: '#FFF', padding: 15, borderRadius: 12, height: 200, fontSize: 16, textAlignVertical: 'top' },
@@ -295,7 +465,7 @@ const styles = StyleSheet.create({
   btnClose: { backgroundColor: '#333', padding: 18, borderRadius: 12, alignItems: 'center', marginTop: 15 },
   pisoSeccion: { marginBottom: 20 },
   pisoTitulo: { color: '#8AB4F8', fontSize: 20, fontWeight: 'bold', marginBottom: 8 },
-  prodRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: '#333' },
+  prodRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: '#333', alignItems: 'center' },
   prodName: { color: '#CCC', fontSize: 18, flex: 1 },
   textGreen: { color: '#4CAF50', fontWeight: 'bold' },
   check: { width: 35, height: 35, borderRadius: 18, borderWidth: 1, borderColor: '#555', justifyContent: 'center', alignItems: 'center' },
